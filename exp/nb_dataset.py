@@ -19,12 +19,22 @@ from exp.nb_config import *
 
 lesion_type_dict = {
     'nv': 'Melanocytic nevi',
-    'mel': 'dermatofibroma',
+    'mel': 'Melanoma',
     'bkl': 'Benign keratosis-like lesions ',
     'bcc': 'Basal cell carcinoma',
     'akiec': 'Actinic keratoses',
     'vasc': 'Vascular lesions',
     'df': 'Dermatofibroma'
+}
+
+lesion_type_vi_dict = {
+    'nv': 'Nốt ruồi',
+    'mel': 'Ung thư hắc tố',
+    'bkl': 'U sừng hóa ác tính ',
+    'bcc': 'U da ung thư tế bào đáy',
+    'akiec': 'Dày sừng quang hóa',
+    'vasc': 'Thương tổn mạch máu',
+    'df': 'U da lành tính'
 }
 
 def preprocess_df(df, valid_size=0.2, seed=AppConfig.SEED):
@@ -78,7 +88,7 @@ class SkinDataBunch:
     def valid_ds(self): return self.valid_dl.dataset
 
     def show_image(self, index=None):
-        dataset = self.train_dl.dataset
+        dataset = self.train_ds
         n_samples = len(dataset)
 
         if not index:
@@ -95,7 +105,7 @@ class SkinDataBunch:
         plt.title(self.labels[y])
 
     def show_grid(self, n_rows=5, n_cols=5):
-        dataset = self.train_dl.dataset
+        dataset = self.train_ds
         array = torch.utils.data.Subset(dataset, np.random.choice(len(dataset), n_rows*n_cols, replace=False))
 
         plt.figure(figsize=(12, 12))
