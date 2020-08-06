@@ -118,3 +118,17 @@ class SkinDataBunch:
                 label = self.labels[int(array[index][1])]
                 plt.title(label, fontsize=12)
         plt.tight_layout()
+
+
+def get_skin_databunch():
+    df = pd.read_csv(PathConfig.CSV_PATH)
+    train_df, valid_df, labels = preprocess_df(df)
+    transform = transforms.Compose([
+        transforms.ToTensor()
+    ])
+    train_ds = SkinDataset(train_df, transform)
+    valid_ds = SkinDataset(valid_df, transform)
+    train_dl = DataLoader(train_ds, batch_size=TrainConfig.BATCH_SIZE)
+    valid_dl = DataLoader(valid_ds, batch_size=TrainConfig.BATCH_SIZE)
+    db = SkinDataBunch(train_dl, valid_dl, labels)
+    return db
