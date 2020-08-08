@@ -8,21 +8,22 @@ class Learner:
     _default_cbs = [TrainEvalCallback]
 
     ALL_CBS = {
-    'begin_fit', 'begin_epoch', 'begin_batch', 'begin_validate'
+    'begin_fit', 'begin_epoch', 'begin_batch', 'begin_validate',
     'after_pred', 'after_loss', 'after_backward', 'after_step',
     'after_batch', 'after_epoch', 'after_fit',
     'after_cancel_batch', 'after_cancel_epoch', 'after_cancel_train'}
 
-
     def __init__(self, model, data, loss_func, opt_func, lr=1e-2, cbs=None, cb_funcs=None):
         self.model, self.data, self.loss_func, self.opt_func, self.lr = model, data, loss_func, opt_func, lr
+
         self.opt = None
         self.cbs = []
+        self.in_train = False
+        self.logger = print
+
         self.add_cbs([cb() for cb in self._default_cbs])
         self.add_cbs(cbs)
         self.add_cbs([cbf() for cbf in listify(cb_funcs)])
-
-        self.logger = print
 
     def set_logger(self, logger):
         self.logger = logger
@@ -65,16 +66,15 @@ class Learner:
         except CancelBatchException:                                self('after_cancel_batch')
         finally:                                                    self('after_batch')
 
-
-    def all_batches():
+    def all_batches(self):
         self.iters = len(self.dl)
         try:
-            for i, (xb, yb) in enumerate(self.dl): self.one_batch(i, xb, yb); print("hehe")
+            for i, (xb, yb) in enumerate(self.dl):
+                self.one_batch(i, xb, yb);
         except CancelEpochException: self('after_cancel_epoch')
 
     def _end_cleanup(self):
-        self.dl,self.xb,self.yb,self.pred,self.loss = None,(None,),(None,),None,None
-
+        self.dl, self.xb, self.yb, self.pred, self.loss = None, (None,), (None,), None, None
 
     def fit(self, epochs, cbs=None, reset_opt=False):
         self.add_cbs(cbs)
@@ -84,7 +84,8 @@ class Learner:
         try:
             self._do_begin_fit(epochs)
             for epoch in range(epochs):
-                if not self._do_begin_epoch(epoch): self.all_batches()
+                if not self._do_begin_epoch(epoch):
+                    self.all_batches()
 
                 with torch.no_grad():
                     self.dl = self.data.valid_dl
@@ -99,7 +100,6 @@ class Learner:
 
     def __call__(self, cb_name):
         res = False
-        print(cb_name)
         assert cb_name in self.ALL_CBS
         for cb in sorted(self.cbs, key=lambda x: x._order):
             res = cb(cb_name) and res

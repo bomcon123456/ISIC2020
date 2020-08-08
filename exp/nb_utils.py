@@ -4,6 +4,8 @@
 #################################################
 # file to edit: dev_nb/utils.ipynb
 
+from collections import Iterable
+
 def listify(o):
     if o is None: return []
     if isinstance(o, list): return o
