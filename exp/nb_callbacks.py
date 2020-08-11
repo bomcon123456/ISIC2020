@@ -41,6 +41,7 @@ class CancelTrainException(Exception): pass
 class CancelFitException(Exception): pass
 class CancelEpochException(Exception): pass
 class CancelBatchException(Exception): pass
+class CancelValidException(Exception): pass
 
 class TrainEvalCallback(Callback):
     def begin_fit(self):
@@ -217,5 +218,6 @@ class ProgressCallback(Callback):
         self.pbar.update(0)
 
 class CudaCallback(Callback):
+    _order = -1
     def begin_fit(self): self.model.cuda()
     def begin_batch(self): self.learner.xb,self.learner.yb = self.xb.cuda(),self.yb.cuda()

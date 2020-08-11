@@ -128,7 +128,7 @@ def get_skin_databunch(size=100, transform=None):
         ])
     train_ds = SkinDataset(train_df[:size], transform)
     valid_ds = SkinDataset(valid_df[:size], transform)
-    train_dl = DataLoader(train_ds, batch_size=TrainConfig.BATCH_SIZE)
+    train_dl = DataLoader(train_ds, batch_size=TrainConfig.BATCH_SIZE, shuffle=True)
     valid_dl = DataLoader(valid_ds, batch_size=TrainConfig.BATCH_SIZE)
     db = SkinDataBunch(train_dl, valid_dl, labels)
     return db

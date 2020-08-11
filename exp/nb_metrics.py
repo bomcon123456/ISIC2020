@@ -30,7 +30,7 @@ class AvgMetric(Metric):
 
     def accumulate(self, learner):
         bs = learner.xb.shape[0]
-        self.total += self.func(learner.pred, learner.yb) * bs
+        self.total += self.func(learner.pred, learner.yb).cpu() * bs
         self.count += bs
 
     @property
@@ -48,7 +48,7 @@ class AvgLoss(Metric):
 
     def accumulate(self, learner):
         bs = learner.xb.shape[0]
-        self.total = learner.loss.detach().mean() * bs
+        self.total = learner.loss.cpu().mean() * bs
         self.count += bs
 
     @property
@@ -68,7 +68,7 @@ class AvgSmoothLoss(Metric):
 
     def accumulate(self, learner):
         self.count += 1
-        self.val = torch.lerp(learner.loss.detach().mean(),
+        self.val = torch.lerp(learner.loss.cpu().mean(),
                               self.val,
                               self.beta)
 
