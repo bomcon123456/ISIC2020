@@ -10,59 +10,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 import time
+import os
+from pathlib import Path
 from functools import partial
 import re
 
 from fastprogress.fastprogress import master_bar, progress_bar
 from fastprogress.fastprogress import format_time
 
-from exp.nb_utils import listify, camel2snake
+from exp.nb_utils import listify, is_listy, camel2snake
 from exp.nb_metrics import AvgLoss, AvgSmoothLoss
-
-class Callback():
-    _order = 0
-
-    def set_learner(self, learner): self.learner = learner
-
-    def __getattr__(self, k): return getattr(self.learner, k)
-
-    def __call__(self, cb_name):
-        f = getattr(self, cb_name, None)
-        if f and f(): return True
-        return False
-
-    @property
-    def name(self):
-        name = re.sub(r'Callback$', '', self.__class__.__name__)
-        return camel2snake(name or 'callback')
-
-
-class CancelTrainException(Exception): pass
-class CancelFitException(Exception): pass
-class CancelEpochException(Exception): pass
-class CancelBatchException(Exception): pass
-class CancelValidException(Exception): pass
-
-class TrainEvalCallback(Callback):
-    def begin_fit(self):
-        self.learner.cur_train_epoch_flt = 0.
-        self.learner.cur_train_iter = 0
-
-    def begin_train(self):
-        self.learner.cur_train_epoch = self.epoch
-        self.learner.pct_train = self.epoch / self.epochs
-        self.model.train()
-        self.learner.in_train = True
-
-    def begin_validate(self):
-        self.model.eval()
-        self.learner.in_train = False
-
-    def after_batch(self):
-        if not self.in_train: return
-        self.learner.cur_train_epoch_flt += 1./self.iters
-        self.learner.pct_train += 1./(self.iters*self.epochs)
-        self.learner.cur_train_iter += 1
+from exp.nb_schedules import SchedExp
 
 class AvgStats():
     def __init__(self, metrics, in_train):
@@ -91,6 +49,53 @@ class AvgStats():
         self.count += bn
         for i,m in enumerate(self.metrics):
             self.total_metrics[i] += m(learner.pred, learner.yb) * bn
+
+class Callback():
+    _order = 0
+
+    def set_learner(self, learner): self.learner = learner
+
+    def __getattr__(self, k): return getattr(self.learner, k)
+
+    def __call__(self, cb_name):
+        f = getattr(self, cb_name, None)
+        if f and f(): return True
+        return False
+
+    @property
+    def name(self):
+        name = re.sub(r'Callback$', '', self.__class__.__name__)
+        return camel2snake(name or 'callback')
+
+
+class CancelTrainException(Exception): pass
+class CancelFitException(Exception): pass
+class CancelEpochException(Exception): pass
+class CancelBatchException(Exception): pass
+class CancelValidException(Exception): pass
+
+class TrainEvalCallback(Callback):
+    _order = -1
+
+    def begin_fit(self):
+        self.learner.cur_train_epoch_flt = 0.
+        self.learner.cur_train_iter = 0
+
+    def begin_train(self):
+        self.learner.cur_train_epoch = self.epoch
+        self.learner.pct_train = self.epoch / self.epochs
+        self.model.train()
+        self.learner.in_train = True
+
+    def begin_validate(self):
+        self.model.eval()
+        self.learner.in_train = False
+
+    def after_batch(self):
+        if not self.in_train: return
+        self.learner.cur_train_epoch_flt += 1./self.iters
+        self.learner.pct_train += 1./(self.iters*self.epochs)
+        self.learner.cur_train_iter += 1
 
 class Recorder(Callback):
     _order = 0
@@ -181,7 +186,7 @@ class ProgressCallback(Callback):
         assert hasattr(self.learner, 'recorder')
         self.mbar = master_bar(list(range(self.epochs)))
         self._write_stats(self.recorder.metric_names)
-        self.learner.logger = self._write_stats
+        self.learner.set_logger(self._write_stats)
 
     def begin_epoch(self):
         if getattr(self, 'mbar', None): self.mbar.update(self.epoch)
@@ -217,7 +222,49 @@ class ProgressCallback(Callback):
         self.pbar = progress_bar(self.dl, parent=getattr(self, 'mbar', None), leave=False)
         self.pbar.update(0)
 
+class LRFinder(ParamScheduler):
+    _order = 1
+
+    def _init_(self, start_lr=1e-7, end_lr=10, n_iters=100, stop_div=True):
+        if is_listy(start_lr):
+            self.scheds = {
+                'lr': [SchedExp(s, e) for (s, e) in zip(start_lr, end_lr)]
+            }
+        else:
+            self.scheds = {
+                'lr': SchedExp(start_lr, end_lr)
+            }
+        self.n_iters, self.stop_div = n_iters, stop_div
+
+    def begin_fit(self):
+        super().begin_fit()
+        self.learner.save('_tmp')
+        self.best_loss = float('inf')
+
+    def begin_batch(self):
+        self._update_val(self.cur_train_iter / self.n_iters)
+
+    def after_batch(self):
+        super().after_batch()
+        if self.smooth_loss < self.best_loss:
+            self.best_loss = self.smooth_loss
+        if self.smooth_loss > 4*self.best_loss and self.stop_div:
+            raise CancelFitException()
+        if self.cur_train_iter >= self.n_iters:
+            raise CancelFitException()
+
+    def begin_validate(self):
+        raise CancelValidException()
+
+    def after_fit(self):
+        self.learner.opt.zero_grad()
+        tmp_path = self.model_dir / '_tmp.pth'
+        if tmp_path.exists():
+            self.learner.load('_tmp')
+            os.remove(tmp_path)
+
 class CudaCallback(Callback):
     _order = -1
+
     def begin_fit(self): self.model.cuda()
-    def begin_batch(self): self.learner.xb,self.learner.yb = self.xb.cuda(),self.yb.cuda()
+    def begin_batch(self): self.learner.xb,self.learner.yb = self.xb.cuda(), self.yb.cuda()

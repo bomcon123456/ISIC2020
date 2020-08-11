@@ -5,6 +5,7 @@
 # file to edit: dev_nb/utils.ipynb
 
 from collections import Iterable
+from collections.abc import Generator
 import re
 
 def listify(o):
@@ -13,6 +14,10 @@ def listify(o):
     if isinstance(o, str): return o
     if isinstance(o, Iterable): return list(o)
     return [o]
+
+def is_listy(x):
+    "`isinstance(x, (tuple,list,L))`"
+    return isinstance(x, (tuple, list, slice, Generator))
 
 _camel_re1 = re.compile('(.)([A-Z][a-z]+)')
 _camel_re2 = re.compile('([a-z0-9])([A-Z])')
