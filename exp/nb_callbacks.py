@@ -5,6 +5,7 @@
 # file to edit: dev_nb/callbacks.ipynb
 
 import torch
+from torch import Tensor
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -37,6 +38,7 @@ class Callback():
 
 
 class CancelTrainException(Exception): pass
+class CancelFitException(Exception): pass
 class CancelEpochException(Exception): pass
 class CancelBatchException(Exception): pass
 
@@ -45,8 +47,9 @@ class TrainEvalCallback(Callback):
         self.learner.cur_train_epoch_flt = 0.
         self.learner.cur_train_iter = 0
 
-    def begin_epoch(self):
+    def begin_train(self):
         self.learner.cur_train_epoch = self.epoch
+        self.learner.pct_train = self.epoch / self.epochs
         self.model.train()
         self.learner.in_train = True
 
@@ -57,6 +60,7 @@ class TrainEvalCallback(Callback):
     def after_batch(self):
         if not self.in_train: return
         self.learner.cur_train_epoch_flt += 1./self.iters
+        self.learner.pct_train += 1./(self.iters*self.epochs)
         self.learner.cur_train_iter += 1
 
 class AvgStats():
@@ -87,87 +91,56 @@ class AvgStats():
         for i,m in enumerate(self.metrics):
             self.total_metrics[i] += m(learner.pred, learner.yb) * bn
 
-class AvgStatsCallback(Callback):
-    def __init__(self, metrics):
-        self.train_stats,self.valid_stats = AvgStats(metrics,True),AvgStats(metrics,False)
-
-    def begin_fit(self):
-        met_names = ['loss'] + [m.__name__ for m in self.train_stats.metrics]
-        names = ['epoch'] + [f'train_{n}' for n in met_names] + [
-            f'valid_{n}' for n in met_names] + ['time']
-        #Write headers of table
-        self.logger(names)
-
-    def begin_epoch(self):
-        self.train_stats.reset()
-        self.valid_stats.reset()
-        self.start_time = time.time()
-
-    def after_loss(self):
-        stats = self.train_stats if self.in_train else self.valid_stats
-        with torch.no_grad(): stats.accumulate(self.learner)
-
-    def after_epoch(self):
-        stats = [str(self.epoch)]
-        for o in [self.train_stats, self.valid_stats]:
-            stats += [f'{v:.6f}' for v in o.avg_stats]
-        stats += [format_time(time.time() - self.start_time)]
-        #Write row
-        self.logger(stats)
-
-class Recorder1(Callback):
-    def begin_fit(self): self.lrs, self.losses = [], []
-
-    def after_batch(self):
-        if not self.in_train: return
-        self.lrs.append(self.opt.param_groups[-1]['lr'])
-        self.losses.append(self.loss.detach().cpu())
-
-    def plot_lr(self): plt.plot(self.lrs)
-
-    def plot_loss(self): plt.plot(self.losses)
-
-    def plot(self, skip_last=0):
-        losses = [o.item() for o in self.losses]
-        n = len(losses)-skip_last
-        plt.xscale('log')
-        plt.plot(self.lrs[:n], losses[:n])
-
 class Recorder(Callback):
     _order = 0
+
+    @staticmethod
+    def _maybe_item(t):
+        t = t.value
+        return t.item() if isinstance(t, Tensor) and t.numel() == 1 else t
 
     def __init__(self, beta=0.98):
         self.loss = AvgLoss()
         self.smooth_loss = AvgSmoothLoss(beta=beta)
 
     def begin_fit(self):
-        self.lrs,self.iters,self.losses,self.values = [],[],[],[]
+        self.lrs, self.iters, self.losses, self.values = [], [], [], []
         headers = ["loss"] + [m.name for m in self.metrics]
         train_h = ["train_{}".format(h) for h in headers]
         valid_h = ["valid_{}".format(h) for h in headers]
         headers = ["epoch"] + train_h + valid_h
         headers.append("time")
-        self.metric_headers = headers
+        self.metric_names = headers
         self.smooth_loss.reset()
-        self.logger(self.metric_headers)
+#         self.logger(self.metric_names)
 
+    def begin_epoch(self):
+        self.cancel_train, self.cancel_valid = False, False
+        self.start_epoch = time.time()
+        self.log = [getattr(self, 'epoch', 0)]
+
+    def begin_train(self):
         # Reset except smooth_loss
         for m in self._train_mets[1:]:
             m.reset()
-
-    def begin_epoch(self):
-        self.cancel_train = False
-        self.start_epoch = time.time()
-        self.log = [getattr(self, 'epoch', 0)]
 
     def begin_validate(self):
         for m in self._valid_mets:
             m.reset()
 
-    def after_epoch(self):
-        self.log += map(lambda x: x.value.item() if hasattr(x, "value") else x, self._train_mets)
-        self.log += map(lambda x: x.value.item() if hasattr(x, "value") else x, self._valid_mets)
+    def after_train(self):
+        self.log += map(lambda x: self._maybe_item(x), self._train_mets)
 
+    def after_validate(self):
+        self.log += map(lambda x: self._maybe_item(x), self._valid_mets)
+
+    def after_cancel_train(self):
+        self.cancel_train = True
+
+    def after_cancel_validate(self):
+        self.cancel_validate = True
+
+    def after_epoch(self):
         self.learner.final_record = self.log[1:].copy()
         self.values.append(self.learner.final_record)
 
@@ -183,8 +156,6 @@ class Recorder(Callback):
         self.lrs.append(self.opt.param_groups[-1]['lr'])
         self.losses.append(self.smooth_loss.value)
         self.learner.smooth_loss = self.smooth_loss.value
-
-    def after_cancel_train(self): self.cancel_train = True
 
     def plot_loss(self, skip_start=5, with_valid=True):
         plt.plot(list(range(skip_start, len(self.losses))), self.losses[skip_start:], label='train')
@@ -202,56 +173,49 @@ class Recorder(Callback):
     def _valid_mets(self):
         return [self.loss] + self.metrics
 
-
-class ParamScheduler(Callback):
-    _order = 1
-
-    def __init__(self, pname, sched_funcs):
-        self.pname,self.sched_funcs = pname,listify(sched_funcs)
-
-    def begin_batch(self):
-        if not self.in_train: return
-        fs = self.sched_funcs
-        if len(fs)==1: fs = fs*len(self.opt.param_groups)
-        pos = self.cur_train_epoch_flt/self.epochs
-        for f,h in zip(fs,self.opt.param_groups): h[self.pname] = f(pos)
-
-
-class LR_Find(Callback):
-    _order = 1
-
-    def __init__(self, max_iter=100, min_lr=1e-6, max_lr=10):
-        self.max_iter,self.min_lr,self.max_lr = max_iter,min_lr,max_lr
-        self.best_loss = 1e9
-
-    def begin_batch(self):
-        if not self.in_train: return
-        pos = self.iter/self.max_iter
-        lr = self.min_lr * (self.max_lr/self.min_lr) ** pos
-        for pg in self.opt.param_groups: pg['lr'] = lr
-
-    def after_step(self):
-        if self.iter>=self.max_iter or self.loss>self.best_loss*10:
-            raise CancelTrainException()
-        if self.loss < self.best_loss: self.best_loss = self.loss
-
 class ProgressCallback(Callback):
-    _order = -1
+    _order = 1
 
     def begin_fit(self):
-        self.mbar = master_bar(range(self.epochs))
-#         self.mbar.on_iter_begin()
-        self.learner.set_logger(partial(self.mbar.write, table=True))
+        assert hasattr(self.learner, 'recorder')
+        self.mbar = master_bar(list(range(self.epochs)))
+        self._write_stats(self.recorder.metric_names)
+        self.learner.logger = self._write_stats
 
-    def after_fit(self): self.mbar.on_iter_end()
-    def after_batch(self): self.pb.update(self.iter)
-    def begin_epoch(self): self.set_pb()
-    def begin_validate(self): self.set_pb()
+    def begin_epoch(self):
+        if getattr(self, 'mbar', None): self.mbar.update(self.epoch)
 
-    def set_pb(self):
-        self.pb = progress_bar(self.dl, parent=self.mbar)
-        self.mbar.update(self.epoch)
+    def begin_train(self):
+        self._launch_pbar()
+
+    def begin_validate(self):
+        self._launch_pbar()
+
+    def after_train(self):
+        self.pbar.on_iter_end()
+
+    def after_validate(self):
+        self.pbar.on_iter_end()
+
+    def after_batch(self):
+        self.pbar.update(self.iter + 1)
+        if hasattr(self, 'smooth_loss'):
+            self.pbar.comment = f"{self.smooth_loss:.4f}"
+
+    def after_fit(self):
+        if getattr(self, 'mbar', None):
+            self.mbar.on_iter_end()
+            delattr(self, 'mbar')
+        self.learner.logger = print
+
+    def _write_stats(self, log):
+        if getattr(self, 'mbar', None):
+            self.mbar.write([f"{l:.6f}" if isinstance(l, float) else str(l) for l in log], table=True)
+
+    def _launch_pbar(self):
+        self.pbar = progress_bar(self.dl, parent=getattr(self, 'mbar', None), leave=False)
+        self.pbar.update(0)
 
 class CudaCallback(Callback):
     def begin_fit(self): self.model.cuda()
-    def begin_batch(self): self.run.xb,self.run.yb = self.xb.cuda(),self.yb.cuda()
+    def begin_batch(self): self.learner.xb,self.learner.yb = self.xb.cuda(),self.yb.cuda()
