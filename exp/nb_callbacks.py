@@ -170,6 +170,17 @@ class Recorder(Callback):
             plt.plot(self.iters[idx:], self.values[idx:], label='valid')
             plt.legend()
 
+    def plot_sched(self, keys=None, figsize=None):
+        assert hasattr(self, 'hps'), '[ERROR] You must run ParamSchedCallback to plot the sched.'
+        keys = self.hps.keys() if keys is None else listify(keys)
+        rows,cols = (len(keys)+1)//2, min(2, len(keys))
+        figsize = figsize or (6*cols,4*rows)
+        _, axs = plt.subplots(rows, cols, figsize=figsize)
+        axs = axs.flatten() if len(keys) > 1 else listify(axs)
+        for p,ax in zip(keys, axs):
+            ax.plot(self.hps[p])
+            ax.set_ylabel(p)
+
     @property
     def _train_mets(self):
         if getattr(self, 'cancel_train', False): return []
@@ -178,6 +189,35 @@ class Recorder(Callback):
     @property
     def _valid_mets(self):
         return [self.loss] + self.metrics
+
+class ParamScheduler(Callback):
+    _order = 0
+
+    def __init__(self, scheds):
+        self.scheds = scheds
+
+    def _update_val(self, percentage):
+        for n, f in self.scheds.items():
+            value = f(percentage)
+            vs = listify(value)
+            if len(vs) == 1: vs = vs * len(self.opt.param_groups)
+            assert len(vs) == len(self.opt.param_groups), f"Trying to set {len(vs)} values for {n} but there are {len(self.opt.param_groups)} parameter groups."
+            for v,h in zip(vs, self.opt.param_groups):
+                h[n] = v
+
+    def begin_fit(self):
+        self.hps = {p:[] for p in self.scheds.keys()}
+
+    def begin_batch(self):
+        self._update_val(self.pct_train)
+
+    def after_batch(self):
+        for p in self.scheds.keys():
+            self.hps[p].append(self.opt.param_groups[-1][p])
+
+    def after_fit(self):
+        if hasattr(self.learner, 'recorder') and hasattr(self, 'hps'):
+            self.recorder.hps = self.hps
 
 class ProgressCallback(Callback):
     _order = 1
