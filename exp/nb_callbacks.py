@@ -18,7 +18,7 @@ import re
 from fastprogress.fastprogress import master_bar, progress_bar
 from fastprogress.fastprogress import format_time
 
-from exp.nb_utils import listify, is_listy, camel2snake
+from exp.nb_utils import listify, is_listy, camel2snake, get_default_device
 from exp.nb_metrics import AvgLoss, AvgSmoothLoss
 from exp.nb_schedules import SchedExp
 from exp.nb_opt_utils import set_hyper
@@ -318,5 +318,12 @@ class LRFinder(ParamScheduler):
 class CudaCallback(Callback):
     _order = -1
 
-    def begin_fit(self): self.model.cuda()
-    def begin_batch(self): self.learner.xb,self.learner.yb = self.xb.cuda(), self.yb.cuda()
+    def __init__(self, device=None):
+        self.device = device
+        if not device:
+            self.device = get_default_device()
+
+    def begin_fit(self): self.model.to(self.device)
+
+    def begin_batch(self):
+        self.learner.xb, self.learner.yb = self.xb.to(self.device), self.yb.to(self.device)

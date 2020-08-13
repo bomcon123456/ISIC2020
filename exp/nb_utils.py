@@ -8,6 +8,8 @@ from collections import Iterable
 from collections.abc import Generator
 import re
 
+import torch
+
 def listify(o):
     if o is None: return []
     if isinstance(o, list): return o
@@ -29,3 +31,9 @@ def camel2snake(name):
 
 def snakify_class_name(obj, cls_name):
     return camel2snake(re.sub(rf'{cls_name}$', '', obj.__class__.__name__) or cls_name.lower())
+
+def get_default_device(use_cuda=None):
+    "Return or set default device; `use_cuda`: None - CUDA if available; True - error if not availabe; False - CPU"
+    b_GPU = use_cuda or (torch.cuda.is_available() and use_cuda is None)
+    assert torch.cuda.is_available() or not b_GPU
+    return torch.device(torch.cuda.current_device()) if b_GPU else torch.device('cpu')
