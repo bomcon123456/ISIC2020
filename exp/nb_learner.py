@@ -4,26 +4,73 @@
 #################################################
 # file to edit: dev_nb/learner.ipynb
 
+from pathlib import Path
+import collections
+
+import torch
+from torch import tensor
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+
+import numpy as np
+
+from exp.nb_callbacks import *
+from exp.nb_utils import listify
+from exp.nb_metrics import Metric, AvgMetric
+from exp.nb_schedules import combined_cos
+from exp.nb_opt_utils import set_hyper
+
+def make_metric(m):
+    return m if isinstance(m, Metric) else AvgMetric(m)
+
+def get_trainable_params(m):
+    "Return all trainable parameters of `m`"
+    return [p for p in m.parameters() if p.requires_grad]
+
 class Learner:
     _default_cbs = [TrainEvalCallback]
 
     ALL_CBS = {
-    'begin_fit', 'begin_epoch', 'begin_batch', 'begin_validate',
+    'begin_fit', 'begin_epoch', 'begin_train', 'begin_batch',
     'after_pred', 'after_loss', 'after_backward', 'after_step',
-    'after_batch', 'after_epoch', 'after_fit',
-    'after_cancel_batch', 'after_cancel_epoch', 'after_cancel_train'}
+    'after_batch', 'after_train', 'begin_validate', 'after_validate',
+    'after_epoch', 'after_fit', 'after_cancel_fit',
+    'after_cancel_batch', 'after_cancel_epoch', 'after_cancel_train', 'after_cancel_validate'}
 
-    def __init__(self, model, data, loss_func, opt_func, lr=1e-2, cbs=None, cb_funcs=None):
-        self.model, self.data, self.loss_func, self.opt_func, self.lr = model, data, loss_func, opt_func, lr
+    def __init__(self, model, data, loss_func,
+                 opt_func, lr=1e-2, wd=None, moms=(0.95, 0.85, 0.95),
+                 metrics=None, cbs=None, cb_funcs=None,
+                 splitter=get_trainable_params,
+                 path=Path('.'), model_dir='models'):
+        self.model, self.data, self.loss_func = model, data, loss_func
+        self.opt_func, self.lr, self.metrics = opt_func, lr, metrics
+        self.splitter = splitter
+        self.wd, self.moms = wd, moms
+        self.path = path
+        self.model_dir = self.path / model_dir
 
         self.opt = None
         self.cbs = []
         self.in_train = False
+        self.epoch = 0
+        self.epochs = 1
+        self.loss = tensor(0.)
         self.logger = print
 
         self.add_cbs([cb() for cb in self._default_cbs])
         self.add_cbs(cbs)
         self.add_cbs([cbf() for cbf in listify(cb_funcs)])
+
+    def create_opt(self):
+        self.opt = self.opt_func(self.splitter(self.model), lr=self.lr)
+
+    @property
+    def metrics(self): return self._metrics
+
+    @metrics.setter
+    def metrics(self, metrics):
+        self._metrics = list(map(make_metric, metrics))
 
     def set_logger(self, logger):
         self.logger = logger
@@ -47,14 +94,24 @@ class Learner:
         self.loss = tensor(0.)
         self('begin_fit')
 
-    def _do_begin_epoch(self, epoch):
-        self.epoch = epoch
-        self.dl = self.data.train_dl
-        return self('begin_epoch')
+    def _do_epoch_train(self):
+        try:
+            self.dl = self.data.train_dl;                           self('begin_train')
+            self.all_batches()
+        except CancelTrainException:                                self('after_cancel_train')
+        finally:                                                    self('after_train')
+
+    def _do_epoch_validate(self):
+        try:
+            self.dl = self.data.valid_dl;                           self('begin_validate')
+            with torch.no_grad():
+                self.all_batches()
+        except CancelValidException:                                self('after_cancel_validate')
+        finally:                                                    self('after_validate')
 
     def one_batch(self, i, xb, yb):
+        self.iter = i
         try:
-            self.iter = i
             self.xb, self.yb = xb, yb;                              self('begin_batch')
             self.pred = self.model(self.xb);                        self('after_pred')
             self.loss = self.loss_func(self.pred, self.yb);         self('after_loss')
@@ -68,35 +125,72 @@ class Learner:
 
     def all_batches(self):
         self.iters = len(self.dl)
-        try:
-            for i, (xb, yb) in enumerate(self.dl):
-                self.one_batch(i, xb, yb);
-        except CancelEpochException: self('after_cancel_epoch')
+        for i, (xb, yb) in enumerate(self.dl):
+            self.one_batch(i, xb, yb);
 
     def _end_cleanup(self):
         self.dl, self.xb, self.yb, self.pred, self.loss = None, (None,), (None,), None, None
 
-    def fit(self, epochs, cbs=None, reset_opt=False):
+    def fit(self, epochs, lr=None, wd=None, cbs=None, reset_opt=False):
         self.add_cbs(cbs)
+
         if reset_opt or not self.opt:
-            self.opt = self.opt_func(self.get_params(), lr=self.lr)
+            self.create_opt()
+
+        if lr is None:
+            lr = self.lr
+        if wd is None:
+            wd = self.wd
+        set_hyper(self.opt, 'lr', lr)
+        if wd is not None:
+            set_hyper(self.opt, 'weight_decay', wd)
 
         try:
             self._do_begin_fit(epochs)
             for epoch in range(epochs):
-                if not self._do_begin_epoch(epoch):
-                    self.all_batches()
-
-                with torch.no_grad():
-                    self.dl = self.data.valid_dl
-                    if not self('begin_validate'): self.all_batches()
-                self('after_epoch')
-
-        except: CancelTrainException: self('after_cancel_train')
+                try:
+                    self.epoch = epoch;                             self('begin_epoch')
+                    self._do_epoch_train()
+                    self._do_epoch_validate()
+                except CancelEpochException:                        self('after_cancel_epoch')
+                finally:                                            self('after_epoch')
+        except CancelFitException:                                  self('after_cancel_fit')
         finally:
             self('after_fit')
             self.remove_cbs(cbs)
             self._end_cleanup()
+
+    def fit_one_cycle(self, epochs, lr_max=None, div=25., div_final=1e5, pct_start=0.25, wd=None,
+                      moms=None, cbs=None, reset_opt=False):
+        lr = lr_max
+        if lr is None:
+            lr = self.lr
+        if reset_opt or not self.opt:
+            self.create_opt()
+        set_hyper(self.opt, 'lr', lr)
+        lr_max = np.array([p['lr'] for p in self.opt.param_groups])
+        scheds = {
+            'lr': combined_cos(pct_start, lr_max/div, lr_max, lr_max/div_final),
+            'momentum': combined_cos(pct_start, *(self.moms if moms is None else moms))
+        }
+        self.fit(epochs, cbs=[ParamScheduler(scheds)] + listify(cbs), reset_opt=reset_opt, wd=wd)
+
+    def lr_find(self, start_lr=1e-7, end_lr=10, n_iters=100, stop_div=True,
+                show_plot=True, suggestions=True):
+        epochs = n_iters // len(self.data.train_dl) + 1
+        cb = LRFinder(start_lr=start_lr, end_lr=end_lr, n_iters=n_iters, stop_div=stop_div)
+        self.fit(epochs, cbs=cb)
+        if show_plot:
+            self.recorder.plot_lr_find()
+        if suggestions:
+            lrs, losses = tensor(self.recorder.lrs[n_iters//10:-5]), tensor(self.recorder.losses[n_iters//10:-5])
+            if len(losses) == 0:
+                return
+            lr_min = lrs[losses.argmin()].item()
+            grads = (losses[1:] - losses[:-1]) / (lrs[1:].log() - lrs[:-1].log())
+            lr_steep = lrs[grads.argmin()].item()
+            SuggestedLRs = collections.namedtuple('SuggestedLRs', ['lr_min', 'lr_steep'])
+            return SuggestedLRs(lr_min/10, lr_steep)
 
     def __call__(self, cb_name):
         res = False
@@ -104,3 +198,34 @@ class Learner:
         for cb in sorted(self.cbs, key=lambda x: x._order):
             res = cb(cb_name) and res
         return res
+
+    def save(self, file, with_opt=True, prickle_proptocol=2):
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        file = self.model_dir / (file+'.pth')
+        if self.opt is None:
+            with_opt = False
+        state = self.model.state_dict()
+        if with_opt:
+            state = {
+                'model': state,
+                'opt': self.opt.state_dict()
+            }
+        torch.save(state, file, pickle_protocol=prickle_proptocol)
+
+    def load(self, file, with_opt=False, strict=True):
+        if self.opt is None:
+            self.create_opt()
+        file = self.model_dir / (file+'.pth')
+        state = torch.load(file)
+        hasopt = set(state) == {'model', 'opt'}
+        model_state = state['model'] if hasopt else state
+        self.model.load_state_dict(model_state, strict=strict)
+        if hasopt and with_opt:
+            try:
+                self.opt.load_state_dict(state['opt'])
+            except:
+                if with_opt:
+                    print('[ERROR] Could not load optimizer state.')
+        elif with_opt:
+            print('[WARN] Saved file doenst contain an optimizer state.')
+        return self

@@ -17,15 +17,15 @@ def even_mults(start, stop, n):
     return np.array([start*(step**i) for i in range(n)])
 
 
-def set_hyper(self, opt, key, val):
+def set_hyper(opt, key, val):
     if isinstance(val, slice):
         if val.start:
             val = even_mults(val.start, val.stop, len(opt.param_groups))
         else:
             val = [val.stop/10] * (len(opt.param_groups) - 1) + (val.stop)
-        vs = listify(val)
-        if len(vs) == 1:
-            vs = vs * len(opt.param_groups)
-        assert len(vs) == len(opt.param_groups), f"Trying to set {len(vs)} values for {n} but there are {len(opt.param_groups)} parameter groups."
-        for v, p in zip(vs, self.opt.param_groups):
-            p[key] = v
+    vs = listify(val)
+    if len(vs) == 1:
+        vs = vs * len(opt.param_groups)
+    assert len(vs) == len(opt.param_groups), f"Trying to set {len(vs)} values for {n} but there are {len(opt.param_groups)} parameter groups."
+    for v, p in zip(vs, opt.param_groups):
+        p[key] = v

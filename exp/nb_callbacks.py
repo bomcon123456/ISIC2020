@@ -21,6 +21,7 @@ from fastprogress.fastprogress import format_time
 from exp.nb_utils import listify, is_listy, camel2snake
 from exp.nb_metrics import AvgLoss, AvgSmoothLoss
 from exp.nb_schedules import SchedExp
+from exp.nb_opt_utils import set_hyper
 
 class AvgStats():
     def __init__(self, metrics, in_train):
@@ -170,6 +171,16 @@ class Recorder(Callback):
             plt.plot(self.iters[idx:], self.values[idx:], label='valid')
             plt.legend()
 
+    def plot_lr_find(self, skip_end=5):
+        "Plot the result of an LR Finder test (won't work if you didn't do `learn.lr_find()` before)"
+        lrs = self.lrs if skip_end == 0 else self.lrs[:-skip_end]
+        losses = self.losses if skip_end == 0 else self.losses[:-skip_end]
+        fig, ax = plt.subplots(1,1)
+        ax.plot(lrs, losses)
+        ax.set_ylabel("Loss")
+        ax.set_xlabel("Learning Rate")
+        ax.set_xscale('log')
+
     def plot_sched(self, keys=None, figsize=None):
         assert hasattr(self, 'hps'), '[ERROR] You must run ParamSchedCallback to plot the sched.'
         keys = self.hps.keys() if keys is None else listify(keys)
@@ -199,11 +210,12 @@ class ParamScheduler(Callback):
     def _update_val(self, percentage):
         for n, f in self.scheds.items():
             value = f(percentage)
-            vs = listify(value)
-            if len(vs) == 1: vs = vs * len(self.opt.param_groups)
-            assert len(vs) == len(self.opt.param_groups), f"Trying to set {len(vs)} values for {n} but there are {len(self.opt.param_groups)} parameter groups."
-            for v,h in zip(vs, self.opt.param_groups):
-                h[n] = v
+            set_hyper(self.opt, n, value)
+#             vs = listify(value)
+#             if len(vs) == 1: vs = vs * len(self.opt.param_groups)
+#             assert len(vs) == len(self.opt.param_groups), f"Trying to set {len(vs)} values for {n} but there are {len(self.opt.param_groups)} parameter groups."
+#             for v,h in zip(vs, self.opt.param_groups):
+#                 h[n] = v
 
     def begin_fit(self):
         self.hps = {p:[] for p in self.scheds.keys()}
@@ -265,7 +277,7 @@ class ProgressCallback(Callback):
 class LRFinder(ParamScheduler):
     _order = 1
 
-    def _init_(self, start_lr=1e-7, end_lr=10, n_iters=100, stop_div=True):
+    def __init__(self, start_lr=1e-7, end_lr=10, n_iters=100, stop_div=True):
         if is_listy(start_lr):
             self.scheds = {
                 'lr': [SchedExp(s, e) for (s, e) in zip(start_lr, end_lr)]

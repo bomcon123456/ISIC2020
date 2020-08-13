@@ -68,7 +68,9 @@ def combine_scheds(pcts, scheds):
     def _inner(pos):
         if pos == 1.:
             return scheds[-1](1.)
-        idx = (pos >= pcts).nonzero().max()
+        idx = (pos >= pcts).nonzero(as_tuple=False).max()
+        if idx == len(pcts) - 1:
+            return scheds[-1](pos)
         actual_pos = (pos - pcts[idx]) / (pcts[idx+1] - pcts[idx])
         return scheds[idx](actual_pos.item())
     return _inner
